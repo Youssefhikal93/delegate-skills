@@ -169,5 +169,41 @@ export async function runAgy(h) {
     analysis.result.status === 0 &&
     analysis.value.status === "completed" &&
     analysis.value.exitCode === 0 &&
-    analysis.value.finalMessage === "fake agy analysis completed");
+    analysis.value.finalMessage === "fake agy analysis completed" &&
+    analysis.value.stallTimeout === null);
+
+  // #89: a run whose log keeps growing with reconnect handshakes but no generation call
+  // is stalled, not slow - the stall watchdog must end it long before the wall clock.
+  const stalled = run("stall", "agy-stall", null, undefined, ["--stall-timeout", "1s"]);
+  h.check("agy stall: no generation call within --stall-timeout reports stalled, distinct from timeout",
+    stalled.result.status !== 0 &&
+    stalled.result.status === stalled.value.exitCode &&
+    stalled.value.status === "stalled" &&
+    stalled.value.stallTimeout === "1s" &&
+    stalled.value.error?.includes("--stall-timeout 1s") &&
+    Array.isArray(stalled.value.touchedFiles));
+
+  const streaming = run("streaming", "agy-streaming", null, undefined, ["--stall-timeout", "1s"]);
+  h.check("agy stall: steady generation calls (markers split across writes) keep a 3s run alive under a 1s --stall-timeout",
+    streaming.result.status === 0 &&
+    streaming.value.status === "completed" &&
+    streaming.value.finalMessage === "fake agy streamed to completion");
+
+  const stallOff = run("stall-off", "agy-stall", null, undefined, ["--timeout", "2s"]);
+  h.check("agy stall: the stall watchdog is opt-in; without it the wall-clock watchdog reports timeout",
+    stallOff.result.status !== 0 &&
+    stallOff.value.status === "timeout" &&
+    stallOff.value.stallTimeout === null);
+
+  for (const bad of ["0s", "soon", "999999h"]) {
+    const badOut = join(h.scratch, `out-bad-stall-${bad}-agy`);
+    const badRun = spawnSync(process.execPath, [
+      h.relayPath("agy"),
+      "--brief", h.briefPath,
+      "--out-dir", badOut,
+      "--stall-timeout", bad,
+    ], { env: h.baseEnv, encoding: "utf8" });
+    h.check(`agy stall: --stall-timeout ${bad} is a usage error with no result file`,
+      badRun.status === 2 && badRun.stderr.includes("--stall-timeout") && !existsSync(join(badOut, "result.json")));
+  }
 }
