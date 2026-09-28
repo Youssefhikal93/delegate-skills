@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 export async function runAgy(h) {
   const readArgs = (path) => !existsSync(path)
@@ -174,14 +174,57 @@ export async function runAgy(h) {
 
   // #89: a run whose log keeps growing with reconnect handshakes but no generation call
   // is stalled, not slow - the stall watchdog must end it long before the wall clock.
-  const stalled = run("stall", "agy-stall", null, undefined, ["--stall-timeout", "1s"]);
-  h.check("agy stall: no generation call within --stall-timeout reports stalled, distinct from timeout",
-    stalled.result.status !== 0 &&
-    stalled.result.status === stalled.value.exitCode &&
-    stalled.value.status === "stalled" &&
-    stalled.value.stallTimeout === "1s" &&
-    stalled.value.error?.includes("--stall-timeout 1s") &&
-    Array.isArray(stalled.value.touchedFiles));
+  // The relay kills the stalled fake with SIGTERM on POSIX and taskkill /f on Windows.
+  const stallExit = h.WIN ? { exitCode: 1, signal: null } : { exitCode: 143, signal: "SIGTERM" };
+  const stallRun = (name, { workDir = h.freshRepo(`work-${name}-agy`), dirt = null, edit = null, extraArgs = [], env = {} } = {}) => {
+    const outDir = join(h.scratch, `out-${name}-agy`);
+    if (dirt) writeFileSync(join(workDir, dirt), "pre-existing change\n");
+    const result = spawnSync(process.execPath, [
+      h.relayPath("agy"),
+      "--brief", h.briefPath,
+      "--cd", workDir,
+      "--out-dir", outDir,
+      "--stall-timeout", "1s",
+      ...extraArgs,
+    ], {
+      env: { ...h.baseEnv, SMOKE_MODE: "agy-stall", ...(edit ? { SMOKE_EDIT_FILE: join(workDir, edit) } : {}), ...env },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    return { result, value: existsSync(join(outDir, "result.json")) ? h.result(outDir) : {} };
+  };
+  const sameList = (actual, expected) => Array.isArray(actual) && actual.length === expected.length &&
+    actual.every((line, i) => line.replaceAll("\\", "/") === expected[i]);
+  const stalledAs = (label, { result, value }, touchedFiles, readOnlyViolation = null) => {
+    const touchedOk = touchedFiles === null ? value.touchedFiles === null
+      : typeof touchedFiles === "function" ? touchedFiles(value.touchedFiles)
+        : sameList(value.touchedFiles, touchedFiles);
+    h.check(`agy stall ${label}: exact stalled result fields`,
+      result.status === stallExit.exitCode &&
+      value.schema === "delegate-relay.result.v1" &&
+      value.status === "stalled" &&
+      value.exitCode === stallExit.exitCode &&
+      value.signal === stallExit.signal &&
+      value.stallTimeout === "1s" &&
+      value.finalMessage === "" &&
+      value.error === "agy logged no streamGenerateContent call for --stall-timeout 1s; killed by the relay stall watchdog — the working tree may hold nearly finished work, inspect it before re-dispatching" &&
+      Array.isArray(value.stderrTail) &&
+      touchedOk &&
+      value.readOnlyViolation === readOnlyViolation);
+    if (!touchedOk) console.error(value.touchedFiles);
+  };
+
+  stalledAs("clean", stallRun("stall-clean"), []);
+  stalledAs("clean with edits", stallRun("stall-edit", { edit: "work.txt" }), ["?? work.txt"]);
+  stalledAs("pre-dirty", stallRun("stall-pre-dirty", { dirt: "pre-existing.txt" }), ["?? pre-existing.txt"]);
+  stalledAs("same dirty path", stallRun("stall-same-dirty", { dirt: "pre-existing.txt", edit: "pre-existing.txt" }), ["?? pre-existing.txt"]);
+  stalledAs("dirty submodule", stallRun("stall-dirty-submodule", { workDir: dirtySubmoduleRepo("stall-dirty-submodule") }),
+    (lines) => Array.isArray(lines) && lines.some((line) => line.endsWith("nested")));
+  const noGitPath = [join(h.scratch, "shim"), dirname(process.execPath),
+    ...(h.WIN ? [join(process.env.SystemRoot, "System32")] : [])].join(delimiter);
+  stalledAs("git unavailable", stallRun("stall-no-git", { env: { PATH: noGitPath } }), null);
+  stalledAs("read-only clean", stallRun("stall-read-only-clean", { extraArgs: ["--read-only"] }), [], false);
+  stalledAs("read-only with edits", stallRun("stall-read-only-edit", { edit: "work.txt", extraArgs: ["--read-only"] }), ["?? work.txt"], true);
 
   const streaming = run("streaming", "agy-streaming", null, undefined, ["--stall-timeout", "1s"]);
   h.check("agy stall: steady generation calls (markers split across writes) keep a 3s run alive under a 1s --stall-timeout",

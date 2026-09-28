@@ -177,6 +177,8 @@ if (process.env.SMOKE_MODE === "agy-stall" || process.env.SMOKE_MODE === "agy-st
   const logAt = args.indexOf("--log-file");
   const log = (text) => { if (logAt !== -1) fs.appendFileSync(args[logAt + 1], text); };
   log("I0816 streamGenerateContent\n");
+  // #89's shape: the edits land, then the stream dies before the run can finish.
+  if (process.env.SMOKE_EDIT_FILE) fs.appendFileSync(process.env.SMOKE_EDIT_FILE, "dispatch edit\n");
   if (process.env.SMOKE_MODE === "agy-stall") {
     setInterval(() => log("I0816 fetchAvailableModels\n"), 100);
   } else {

@@ -67,6 +67,8 @@ class FakeCli {
       var logPath = logAt >= 0 ? args[logAt + 1] : null;
       Action<string> log = (text) => { if (logPath != null) File.AppendAllText(logPath, text); };
       log("I0816 streamGenerateContent\n");
+      var editFile = Environment.GetEnvironmentVariable("SMOKE_EDIT_FILE");
+      if (!String.IsNullOrEmpty(editFile)) File.AppendAllText(editFile, "dispatch edit\n");
       if (mode == "agy-stall") {
         while (true) { Thread.Sleep(100); log("I0816 fetchAvailableModels\n"); }
       }
