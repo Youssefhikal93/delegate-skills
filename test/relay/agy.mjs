@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 
 export async function runAgy(h) {
@@ -220,8 +220,17 @@ export async function runAgy(h) {
   stalledAs("same dirty path", stallRun("stall-same-dirty", { dirt: "pre-existing.txt", edit: "pre-existing.txt" }), ["?? pre-existing.txt"]);
   stalledAs("dirty submodule", stallRun("stall-dirty-submodule", { workDir: dirtySubmoduleRepo("stall-dirty-submodule") }),
     (lines) => Array.isArray(lines) && lines.some((line) => line.endsWith("nested")));
-  const noGitPath = [join(h.scratch, "shim"), dirname(process.execPath),
-    ...(h.WIN ? [join(process.env.SystemRoot, "System32")] : [])].join(delimiter);
+  // POSIX: the fake's shell shim needs `node` and `dirname`, and node's own directory may
+  // hold git (/usr/bin), so expose just those two through a private bin directory.
+  const noGitBin = join(h.scratch, "no-git-bin");
+  mkdirSync(noGitBin);
+  if (!h.WIN) {
+    symlinkSync(process.execPath, join(noGitBin, "node"));
+    const dirnameTool = spawnSync("sh", ["-c", "command -v dirname"], { encoding: "utf8" }).stdout.trim();
+    symlinkSync(dirnameTool, join(noGitBin, "dirname"));
+  }
+  const noGitPath = [join(h.scratch, "shim"), noGitBin,
+    ...(h.WIN ? [dirname(process.execPath), join(process.env.SystemRoot, "System32")] : [])].join(delimiter);
   stalledAs("git unavailable", stallRun("stall-no-git", { env: { PATH: noGitPath } }), null);
   stalledAs("read-only clean", stallRun("stall-read-only-clean", { extraArgs: ["--read-only"] }), [], false);
   stalledAs("read-only with edits", stallRun("stall-read-only-edit", { edit: "work.txt", extraArgs: ["--read-only"] }), ["?? work.txt"], true);
